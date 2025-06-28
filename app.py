@@ -13,7 +13,7 @@ import torch.nn.functional as F
 load_dotenv()
 
 # Try to get API key from Streamlit secrets first, then from environment
-GEMINI_API_KEY = st.secrets["google_key"]
+GEMINI_API_KEY = st.secrets["GOOGLE_API_KEY"]
 
 genai.configure(api_key=GEMINI_API_KEY)
 
