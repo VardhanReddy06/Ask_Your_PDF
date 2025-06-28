@@ -2,21 +2,54 @@ import os
 import streamlit as st
 import fitz  # PyMuPDF
 import google.generativeai as genai
-from sentence_transformers import SentenceTransformer
 import faiss
 import numpy as np
 from dotenv import load_dotenv
-import os
-# ------------------- Configuration ------------------- #
-load_dotenv() # 🔁 Replace this
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+import torch
+from transformers import AutoTokenizer, AutoModel
+import torch.nn.functional as F
 
-st.set_page_config(page_title="PDF Chatbot with Memory ", layout="wide")
+# ------------------- Configuration ------------------- #
+load_dotenv()
+
+# Try to get API key from Streamlit secrets first, then from environment
+GEMINI_API_KEY = st.secrets["google_key"]
+
+genai.configure(api_key=GEMINI_API_KEY)
+
 @st.cache_resource
 def load_embedding_model():
-    return SentenceTransformer('paraphrase-MiniLM-L3-v2')
+    """Load the embedding model and tokenizer"""
+    model_name = 'sentence-transformers/paraphrase-MiniLM-L3-v2'
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModel.from_pretrained(model_name)
+    return tokenizer, model
 
-embedding_model = load_embedding_model()
+def mean_pooling(model_output, attention_mask):
+    """Mean pooling to get sentence embeddings"""
+    token_embeddings = model_output[0]
+    input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+    return torch.sum(token_embeddings * input_mask_expanded, 1) / torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+
+def encode_texts(texts, tokenizer, model, max_length=512):
+    """Encode texts to embeddings"""
+    # Tokenize sentences
+    encoded_input = tokenizer(texts, padding=True, truncation=True, max_length=max_length, return_tensors='pt')
+    
+    # Compute token embeddings
+    with torch.no_grad():
+        model_output = model(**encoded_input)
+    
+    # Perform pooling
+    sentence_embeddings = mean_pooling(model_output, encoded_input['attention_mask'])
+    
+    # Normalize embeddings
+    sentence_embeddings = F.normalize(sentence_embeddings, p=2, dim=1)
+    
+    return sentence_embeddings.numpy()
+
+# Load models once
+tokenizer, embedding_model = load_embedding_model()
 
 # ------------------- PDF Processing ------------------- #
 @st.cache_data(show_spinner="📖 Extracting text...")
@@ -42,11 +75,11 @@ def chunk_text(text, max_chars=500):
 
 @st.cache_data(show_spinner="📐 Creating embeddings...")
 def embed_chunks(chunks):
-    vectors = embedding_model.encode(chunks)
-    return np.array(vectors).astype("float32")
+    vectors = encode_texts(chunks, tokenizer, embedding_model)
+    return vectors.astype("float32")
 
 def search_chunks(query, chunks, chunk_vectors, k=3):
-    query_vec = embedding_model.encode([query]).astype("float32")
+    query_vec = encode_texts([query], tokenizer, embedding_model).astype("float32")
     index = faiss.IndexFlatL2(chunk_vectors.shape[1])
     index.add(chunk_vectors)
     _, indices = index.search(query_vec, k)
@@ -71,33 +104,23 @@ A:"""
     stream = model.generate_content(prompt, stream=True)
     return stream
 
-
+# ------------------- Streamlit App ------------------- #
+st.set_page_config(page_title="Chat With Pdf", layout="wide")
 
 # Sidebar – Upload, Clear Chat
 st.sidebar.title("📁 Upload & Analyze")
-
 uploaded_file = st.sidebar.file_uploader("Upload a PDF", type="pdf")
 
-
 # Detect PDF change using a hash
-
 if uploaded_file is not None:
-
     file_hash = hash(uploaded_file.getvalue())  # Hash file content
 
-
     if st.session_state.get("last_file_hash") != file_hash:
-
         # New file uploaded — reset state
-
         st.session_state.chat_history = []
-
         st.session_state.pdf_chunks = None
-
         st.session_state.chunk_vectors = None
-
         st.session_state.last_file_hash = file_hash
-
         st.rerun()  # Re-run app with clean state
 
 # Initialize session state
@@ -124,7 +147,7 @@ if uploaded_file and st.session_state.pdf_chunks is None:
     st.sidebar.success("✅ PDF processed!")
 
 # Main Chat Area
-st.title("🧠 Gemini PDF Chatbot (with Memory)")
+st.title("🧠 Chat with your PDF")
 
 # Display previous messages
 for entry in st.session_state.chat_history:
